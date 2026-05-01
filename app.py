@@ -5,6 +5,8 @@ import requests
 from urllib.parse import urlencode
 import os
 import subprocess
+import jwt
+from jwt import algorithms
 
 app = Flask(__name__)
 app.secret_key = "lab3_secret_key_change_me"
@@ -13,6 +15,10 @@ CASDOOR_BASE_URL = "https://localhost:8443"
 CLIENT_ID = "bc51d0983fe505ce310e"
 CLIENT_SECRET = "5e61a2bfcc5b0da369c607e962d1db45a0bfdf59"
 REDIRECT_URI = "https://127.0.0.1:5000/callback"
+
+# ВАЖЛИВО:
+# тут має бути точна назва застосунку в Casdoor
+APPLICATION_NAME = "web_lab3"
 
 
 def get_mkcert_ca_bundle():
@@ -27,6 +33,48 @@ def get_mkcert_ca_bundle():
 
 
 VERIFY_CERT = get_mkcert_ca_bundle()
+
+
+def get_jwks():
+    jwks_url = f"{CASDOOR_BASE_URL}/.well-known/{APPLICATION_NAME}/jwks"
+    resp = requests.get(jwks_url, timeout=15, verify=VERIFY_CERT)
+    resp.raise_for_status()
+    return resp.json()
+
+
+def get_signing_key(token: str):
+    unverified_header = jwt.get_unverified_header(token)
+    kid = unverified_header.get("kid")
+    if not kid:
+        raise jwt.InvalidTokenError("JWT header does not contain 'kid'")
+
+    jwks = get_jwks()
+    keys = jwks.get("keys", [])
+
+    for jwk in keys:
+        if jwk.get("kid") == kid:
+            return algorithms.RSAAlgorithm.from_jwk(jwk)
+
+    raise jwt.InvalidTokenError("Matching JWK for token 'kid' was not found")
+
+
+def validate_jwt_token(token: str):
+    signing_key = get_signing_key(token)
+
+    expected_issuer = "http://localhost:8443"
+
+    payload = jwt.decode(
+        token,
+        key=signing_key,
+        algorithms=["RS256"],
+        audience=CLIENT_ID,
+        issuer=expected_issuer,
+        options={
+            "require": ["exp", "iss", "aud"]
+        },
+        leeway=30
+    )
+    return payload
 
 
 @app.get("/")
@@ -97,37 +145,51 @@ def callback():
 
     token_json = token_resp.json()
     access_token = token_json.get("access_token")
+    id_token = token_json.get("id_token")
 
     if not access_token:
         return jsonify({"error": "Access token is missing in response"}), 400
 
+    if not id_token:
+        return jsonify({"error": "ID token is missing in response"}), 400
+
     response = make_response(redirect("/"))
     response.set_cookie("access_token", access_token, httponly=False, samesite="Lax", secure=True)
+    response.set_cookie("id_token", id_token, httponly=False, samesite="Lax", secure=True)
     response.set_cookie("oidc_state", "", expires=0)
     return response
 
 
 @app.get("/user-info")
 def user_info():
-    access_token = request.cookies.get("access_token")
-    if not access_token:
+    id_token = request.cookies.get("id_token")
+    if not id_token:
         return jsonify({"error": "Unauthorized: token is missing"}), 401
 
-    headers = {
-        "Authorization": f"Bearer {access_token}"
-    }
+    try:
+        payload = validate_jwt_token(id_token)
 
-    resp = requests.get(
-        f"{CASDOOR_BASE_URL}/api/userinfo",
-        headers=headers,
-        timeout=15,
-        verify=VERIFY_CERT
-    )
+        user_info_payload = {
+            "sub": payload.get("sub"),
+            "aud": payload.get("aud"),
+            "iss": payload.get("iss"),
+            "name": payload.get("name"),
+            "email": payload.get("email"),
+            "email_verified": payload.get("email_verified"),
+            "preferred_username": payload.get("preferred_username"),
+            "picture": payload.get("picture"),
+            "exp": payload.get("exp"),
+            "iat": payload.get("iat"),
+        }
 
-    if resp.status_code == 200:
-        return jsonify(resp.json())
+        return jsonify(user_info_payload)
 
-    return jsonify({"error": "Unauthorized: token is invalid"}), 401
+    except jwt.ExpiredSignatureError:
+        return jsonify({"error": "Unauthorized: token is expired"}), 401
+    except jwt.InvalidTokenError as e:
+        return jsonify({"error": f"Unauthorized: invalid token ({str(e)})"}), 401
+    except Exception as e:
+        return jsonify({"error": f"Unauthorized: validation failed ({str(e)})"}), 401
 
 
 if __name__ == "__main__":

@@ -16,8 +16,7 @@ CLIENT_ID = "bc51d0983fe505ce310e"
 CLIENT_SECRET = "5e61a2bfcc5b0da369c607e962d1db45a0bfdf59"
 REDIRECT_URI = "https://127.0.0.1:5000/callback"
 
-# ВАЖЛИВО:
-# тут має бути точна назва застосунку в Casdoor
+
 APPLICATION_NAME = "web_lab3"
 
 
